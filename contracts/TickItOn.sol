@@ -315,65 +315,61 @@ contract TickItOn is
         }
     }
 
-    /**
-     * @dev Buy ticket cross-chain via CCIP
-     * @param _eventId Event ID on destination chain
-     * @param _quantity Number of tickets
-     * @param _destinationChain Target chain selector
-     * @param _destinationContract Target contract address
-     */
-    function buyTicketCrossChain(
-        uint256 _eventId,
-        uint256 _quantity,
-        uint64 _destinationChain,
-        address _destinationContract
-    ) external payable nonReentrant {
-        require(allowedChains[_destinationChain], "Chain not supported");
-        require(msg.value > 0, "Must send payment");
+    // REPLACE the existing buyTicketCrossChain function with this corrected version:
 
-        // Calculate CCIP fee
-        uint256 ccipFee = _calculateCCIPFee(_destinationChain, msg.value);
-        require(
-            linkToken.balanceOf(msg.sender) >= ccipFee,
-            "Insufficient LINK for CCIP fee"
-        );
-        require(
-            linkToken.allowance(msg.sender, address(this)) >= ccipFee,
-            "LINK allowance needed"
-        );
+/**
+ * @dev Buy ticket cross-chain via CCIP
+ * @param _eventId Event ID on destination chain
+ * @param _quantity Number of tickets
+ * @param _destinationChain Target chain selector
+ * @param _destinationContract Target contract address
+ */
+function buyTicketCrossChain(
+    uint256 _eventId,
+    uint256 _quantity,
+    uint64 _destinationChain,
+    address _destinationContract
+) external payable nonReentrant {
+    require(allowedChains[_destinationChain], "Chain not supported");
+    require(msg.value > 0, "Must send payment");
 
-        // Transfer LINK fee from user
-        linkToken.transferFrom(msg.sender, address(this), ccipFee);
+    // 1. Prepare the CCIP message payload
+    CrossChainMessage memory message = CrossChainMessage({
+        buyer: msg.sender,
+        eventId: _eventId,
+        ticketQuantity: _quantity,
+        totalPayment: msg.value,
+        sourceChain: getCurrentChainSelector(),
+        msgType: MessageType.BUY_TICKET
+    });
 
-        // Prepare CCIP message
-        CrossChainMessage memory message = CrossChainMessage({
-            buyer: msg.sender,
-            eventId: _eventId,
-            ticketQuantity: _quantity,
-            totalPayment: msg.value,
-            sourceChain: getCurrentChainSelector(),
-            msgType: MessageType.BUY_TICKET
-        });
+    // 2. Build the full CCIP Message struct
+    Client.EVM2AnyMessage memory ccipMessage = _buildCcipMessage(
+        _destinationContract,
+        message,
+        msg.value
+    );
 
-        Client.EVM2AnyMessage memory ccipMessage = Client.EVM2AnyMessage({
-            receiver: abi.encode(_destinationContract),
-            data: abi.encode(message),
-            tokenAmounts: new Client.EVMTokenAmount[](1),
-            extraArgs: Client._argsToBytes(
-                Client.EVMExtraArgsV1({gasLimit: 300000})
-            ),
-            feeToken: address(linkToken)
-        });
+    // 3. Get the authoritative fee from the router
+    uint256 ccipFee = ccipRouter.getFee(_destinationChain, ccipMessage);
 
-        // Include native token transfer
-        ccipMessage.tokenAmounts[0] = Client.EVMTokenAmount({
-            token: address(0), // Native token
-            amount: msg.value
-        });
+    // 4. Check user's LINK balance and allowance
+    require(
+        linkToken.balanceOf(msg.sender) >= ccipFee,
+        "Insufficient LINK for CCIP fee"
+    );
+    require(
+        linkToken.allowance(msg.sender, address(this)) >= ccipFee,
+        "LINK allowance needed for CCIP fee"
+    );
 
-        // Send CCIP message
-        ccipRouter.ccipSend(_destinationChain, ccipMessage);
-    }
+    // 5. Transfer LINK fee from user to this contract
+    linkToken.transferFrom(msg.sender, address(this), ccipFee);
+    
+    // 6. Send the CCIP message
+    // The router will use the LINK held by this contract to pay the fee.
+    ccipRouter.ccipSend(_destinationChain, ccipMessage);
+}
 
     /**
      * @dev Handle incoming CCIP messages
@@ -508,50 +504,65 @@ contract TickItOn is
      * @param _destinationContract Target contract
      */
     function buyResaleTicketCrossChain(
-        uint256 _resaleId,
-        uint64 _destinationChain,
-        address _destinationContract
-    ) external payable nonReentrant {
-        require(allowedChains[_destinationChain], "Chain not supported");
+    uint256 _resaleId,
+    uint64 _destinationChain,
+    address _destinationContract
+) external payable nonReentrant {
+    require(allowedChains[_destinationChain], "Chain not supported");
 
-        uint256 ccipFee = _calculateCCIPFee(_destinationChain, msg.value);
-        require(
-            linkToken.balanceOf(msg.sender) >= ccipFee,
-            "Insufficient LINK"
-        );
-        require(
-            linkToken.allowance(msg.sender, address(this)) >= ccipFee,
-            "LINK allowance needed"
-        );
+    CrossChainMessage memory message = CrossChainMessage({
+        buyer: msg.sender,
+        eventId: _resaleId, // Using eventId field for resaleId
+        ticketQuantity: 1,
+        totalPayment: msg.value,
+        sourceChain: getCurrentChainSelector(),
+        msgType: MessageType.RESALE_TICKET
+    });
 
-        linkToken.transferFrom(msg.sender, address(this), ccipFee);
+    Client.EVM2AnyMessage memory ccipMessage = _buildCcipMessage(
+        _destinationContract,
+        message,
+        msg.value
+    );
 
-        CrossChainMessage memory message = CrossChainMessage({
-            buyer: msg.sender,
-            eventId: _resaleId, // Using eventId field for resaleId
-            ticketQuantity: 1,
-            totalPayment: msg.value,
-            sourceChain: getCurrentChainSelector(),
-            msgType: MessageType.RESALE_TICKET
-        });
+    uint256 ccipFee = ccipRouter.getFee(_destinationChain, ccipMessage);
 
-        Client.EVM2AnyMessage memory ccipMessage = Client.EVM2AnyMessage({
-            receiver: abi.encode(_destinationContract),
-            data: abi.encode(message),
-            tokenAmounts: new Client.EVMTokenAmount[](1),
-            extraArgs: Client._argsToBytes(
-                Client.EVMExtraArgsV1({gasLimit: 300000})
-            ),
-            feeToken: address(linkToken)
-        });
+    require(
+        linkToken.balanceOf(msg.sender) >= ccipFee,
+        "Insufficient LINK for CCIP fee"
+    );
+    require(
+        linkToken.allowance(msg.sender, address(this)) >= ccipFee,
+        "LINK allowance needed for CCIP fee"
+    );
 
-        ccipMessage.tokenAmounts[0] = Client.EVMTokenAmount({
-            token: address(0),
-            amount: msg.value
-        });
+    linkToken.transferFrom(msg.sender, address(this), ccipFee);
 
-        ccipRouter.ccipSend(_destinationChain, ccipMessage);
-    }
+    ccipRouter.ccipSend(_destinationChain, ccipMessage);
+}
+function getCrossChainResaleFee(
+    uint64 _destinationChain,
+    address _destinationContract,
+    uint256 _resaleId,
+    uint256 _totalPayment
+) external view returns (uint256) {
+    CrossChainMessage memory message = CrossChainMessage({
+        buyer: msg.sender,
+        eventId: _resaleId, // Using eventId field for resaleId
+        ticketQuantity: 1,
+        totalPayment: _totalPayment,
+        sourceChain: getCurrentChainSelector(),
+        msgType: MessageType.RESALE_TICKET
+    });
+
+    Client.EVM2AnyMessage memory ccipMessage = _buildCcipMessage(
+        _destinationContract,
+        message,
+        _totalPayment
+    );
+
+    return ccipRouter.getFee(_destinationChain, ccipMessage);
+}
 
     function _processCrossChainResale(
         CrossChainMessage memory message,
@@ -763,14 +774,67 @@ contract TickItOn is
                 BASIS_POINTS);
     }
 
-    function _calculateCCIPFee(
-        uint64 _destinationChain,
-        uint256 _amount
-    ) internal view returns (uint256) {
-        // Simplified CCIP fee calculation
-        // In production, use ccipRouter.getFee()
-        return _amount / 100; // 1% of amount as CCIP fee
-    }
+    // ============ HELPER FUNCTIONS ============ // Add this function in this section
+
+/**
+ * @notice A view function for the frontend to calculate the CCIP fee before the user initiates a transaction.
+ * @param _destinationChain The chain selector of the destination chain.
+ * @param _destinationContract The address of the contract on the destination chain.
+ * @param _eventId The ID of the event to buy a ticket for.
+ * @param _quantity The number of tickets to buy.
+ * @param _totalPayment The amount of native currency being sent.
+ * @return The required fee in LINK (or the configured fee token).
+ */
+function getCrossChainPurchaseFee(
+    uint64 _destinationChain,
+    address _destinationContract,
+    uint256 _eventId,
+    uint256 _quantity,
+    uint256 _totalPayment
+) external view returns (uint256) {
+    // Recreate the message struct exactly as it will be in the actual call
+    CrossChainMessage memory message = CrossChainMessage({
+        buyer: msg.sender, // The prospective buyer
+        eventId: _eventId,
+        ticketQuantity: _quantity,
+        totalPayment: _totalPayment,
+        sourceChain: getCurrentChainSelector(),
+        msgType: MessageType.BUY_TICKET
+    });
+
+    Client.EVM2AnyMessage memory ccipMessage = _buildCcipMessage(
+        _destinationContract,
+        message,
+        _totalPayment
+    );
+
+    // Return the fee required for the message
+    return ccipRouter.getFee(_destinationChain, ccipMessage);
+}
+
+// It's good practice to create a private helper for building the message
+// to avoid code duplication.
+function _buildCcipMessage(
+    address _destinationContract,
+    CrossChainMessage memory _payload,
+    uint256 _nativeAmount
+) private view returns (Client.EVM2AnyMessage memory) {
+    Client.EVMTokenAmount[] memory tokenAmounts = new Client.EVMTokenAmount[](1);
+    tokenAmounts[0] = Client.EVMTokenAmount({
+        token: address(0), // Native token
+        amount: _nativeAmount
+    });
+
+    return Client.EVM2AnyMessage({
+        receiver: abi.encode(_destinationContract),
+        data: abi.encode(_payload),
+        tokenAmounts: tokenAmounts,
+        extraArgs: Client._argsToBytes(
+            Client.EVMExtraArgsV1({gasLimit: 300000}) // A reasonable gas limit
+        ),
+        feeToken: address(linkToken)
+    });
+}
 
     function getCurrentChainSelector() public view returns (uint64) {
         if (block.chainid == 1) return 5009297550715157269; // Ethereum
@@ -851,7 +915,105 @@ contract TickItOn is
    function supportsInterface(bytes4 interfaceId) public view override(CCIPReceiver, ERC721, ERC721URIStorage) returns (bool) {
         return super.supportsInterface(interfaceId);
     }
+    // Helpful for frontend demo
+function getEventSummary(uint256 _eventId) external view returns (
+    string memory name,
+    uint256 currentPrice,
+    uint256 ticketsLeft,
+    bool isActive
+) {
+    Event memory eve = events[_eventId];
+    return (
+        eve.name,
+        calculateDynamicPrice(eve.basePrice, eve.ticketsSold),
+        eve.totalTickets - eve.ticketsSold,
+        eve.isActive
+    );
+}
 
+function getTotalStats() external view returns (
+    uint256 totalEvents,
+    uint256 totalTickets,
+    uint256 totalResales
+) {
+    return (eventCounter, ticketCounter, resaleCounter);
+}
+/**
+ * @notice Gets a paginated list of all active events for the marketplace.
+ * @param _offset The starting index to fetch events from.
+ * @param _limit The maximum number of events to return.
+ * @return An array of Event structs.
+ */
+function getActiveEvents(uint256 _offset, uint256 _limit) external view returns (Event[] memory) {
+    uint256 activeEventCount = 0;
+    for (uint256 i = 1; i <= eventCounter; i++) {
+        if (events[i].isActive) {
+            activeEventCount++;
+        }
+    }
+
+    if (_offset >= activeEventCount) {
+        return new Event[](0);
+    }
+
+    uint256 arraySize = activeEventCount - _offset;
+    if (arraySize > _limit) {
+        arraySize = _limit;
+    }
+
+    Event[] memory activeEvents = new Event[](arraySize);
+    uint256 currentIndex = 0;
+    uint256 processedActiveEvents = 0;
+
+    for (uint256 i = 1; i <= eventCounter && currentIndex < arraySize; i++) {
+        if (events[i].isActive) {
+            if (processedActiveEvents >= _offset) {
+                activeEvents[currentIndex] = events[i];
+                currentIndex++;
+            }
+            processedActiveEvents++;
+        }
+    }
+    return activeEvents;
+}
+/**
+ * @notice Gets a paginated list of all active resale listings.
+ * @param _offset The starting index to fetch from.
+ * @param _limit The maximum number of listings to return.
+ * @return An array of ResaleListing structs.
+ */
+function getActiveResaleListings(uint256 _offset, uint256 _limit) external view returns (ResaleListing[] memory) {
+    uint256 activeResaleCount = 0;
+    for (uint256 i = 1; i <= resaleCounter; i++) {
+        if (resaleListings[i].isActive) {
+            activeResaleCount++;
+        }
+    }
+
+    if (_offset >= activeResaleCount) {
+        return new ResaleListing[](0);
+    }
+
+    uint256 arraySize = activeResaleCount - _offset;
+    if (arraySize > _limit) {
+        arraySize = _limit;
+    }
+
+    ResaleListing[] memory activeListings = new ResaleListing[](arraySize);
+    uint256 currentIndex = 0;
+    uint256 processedActiveListings = 0;
+
+    for (uint256 i = 1; i <= resaleCounter && currentIndex < arraySize; i++) {
+        if (resaleListings[i].isActive) {
+            if (processedActiveListings >= _offset) {
+                activeListings[currentIndex] = resaleListings[i];
+                currentIndex++;
+            }
+            processedActiveListings++;
+        }
+    }
+    return activeListings;
+}
     // Accept ETH deposits
     receive() external payable {}
 }
